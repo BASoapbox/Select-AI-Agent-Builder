@@ -1,0 +1,9 @@
+# OCI Python SDK — GenAI chat/embeddings, Object Storage, Vault, IAM
+oci>=2.126.0
+
+# Oracle DB driver — used in THICK mode (wallet auth), so an Oracle
+# Instant Client install is also required; set its path as [database] lib_dir
+oracledb>=2.0.0
+
+# Word document import (menu: Build → Import from Word doc)
+python-docx>=1.1.0

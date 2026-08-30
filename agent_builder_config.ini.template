@@ -1,0 +1,200 @@
+# =============================================================================
+# agent_builder_config.ini — Select AI Agent Builder Configuration
+# =============================================================================
+# Copy this file to agent_builder_config.ini and fill in your own values.
+# Nothing here is read from the template itself — the tool loads
+# agent_builder_config.ini (or whatever you pass to --config).
+#
+# Run Pre-flight Check (menu option 1) to verify your setup.
+#
+# Every example below uses the ACME_CORP demo schema. Substitute your own
+# schema, tenancy, and paths throughout.
+#
+# WHAT IS PRE-CONFIGURED FOR YOU (by your DBA / DE):
+#   - Resource Principal enabled for the target schema (e.g. ACME_CORP)
+#   - GRANT EXECUTE on DBMS_CLOUD_AI, DBMS_CLOUD_AI_AGENT, DBMS_CLOUD
+#   - GRANT PYQADMIN, OML_DEVELOPER (for Python EPE custom tools)
+#   - pyqAppendHostAce (EPE network ACL for OML endpoint)
+#   - IAM dynamic group + policy for OCI GenAI and Object Storage access
+#   - ADW wallet (ask your DE for the wallet directory path)
+#   - Proxy grant: ALTER USER <target_schema> GRANT CONNECT THROUGH <you>
+#
+# WHAT YOU CONFIGURE HERE:
+#   - Your personal connection details (db_user, dsn, wallet, proxy schema)
+#   - Your OCI identity (region, OCI CLI config, compartment)
+#   - Your LLM model and Object Storage preferences
+#
+# SECRETS: no password belongs in this file. The builder resolves the DB
+# password from an OCI Vault secret, then the OCI_DB_PASSWORD_<USER> or
+# OCI_DB_PASSWORD environment variable, then an interactive prompt.
+# =============================================================================
+
+# =============================================================================
+[oci]
+# OCI region where your ADW and GenAI resources live
+# Example: us-chicago-1
+region = us-chicago-1
+
+# Path to your OCI CLI credentials file
+# Example: ~/.oci/config
+config_file = ~/.oci/config
+
+# Profile name within the OCI config file
+# Example: DEFAULT
+config_profile = DEFAULT
+
+# =============================================================================
+[compartment]
+# OCID of the compartment where your ADW instance lives
+# Where to find: OCI Console → Identity & Security → Compartments → copy OCID
+compartment_ocid = ocid1.compartment.oc1..<your-compartment-ocid>
+
+# Display name of the compartment
+# Used in NL2SQL profile oci_compartment_id field
+compartment_name = <your-compartment-name>
+
+# =============================================================================
+[database]
+# Your personal schema username — this is YOUR login, not the target schema
+# Example: DS_USER
+db_user = DS_USER
+
+# Agent-owning schema — the builder connects as db_user[target_schema]
+# The session runs as target_schema; agent objects land in its namespace
+# Your own password authenticates you — target_schema password is never needed
+# Leave blank to connect directly as db_user without proxy
+# Example: ACME_CORP
+target_schema = ACME_CORP
+
+# TNS alias from tnsnames.ora in your ADW wallet
+# Use the _medium service for normal builder operations
+# Example: acmedw_medium
+dsn = acmedw_medium
+
+# Full path to the ADW wallet directory (contains tnsnames.ora, cwallet.sso)
+# Where to find: OCI Console → ADW → Database Connection → Download Wallet
+# Example: /path/to/wallet/Wallet_ACMEDW
+wallet_dir = /path/to/wallet/Wallet_ACMEDW
+
+# Full path to Oracle Instant Client
+# Example: /path/to/instantclient_23_3
+lib_dir = /path/to/instantclient_23_3
+
+# =============================================================================
+[object_storage]
+# OCI Object Storage bucket containing your RAG knowledge base documents
+default_bucket = acme-kb
+
+# Subfolder prefix inside the bucket — leave blank if documents are in bucket root
+default_prefix =
+
+# Local directory of documents to upload for RAG (optional)
+# Supported: .pdf .docx .pptx .xlsx .txt .html .md .xml .json
+# Example: /path/to/my_kb_docs
+doc_directory =
+
+# Full Object Storage URL for the RAG vector index location
+# Format: https://objectstorage.<region>.oraclecloud.com/n/<namespace>/b/<bucket>/o/
+# Auto-populated by Create bucket / upload documents (menu option 6) — for
+# the current session only, not saved back to this file. Update this value
+# here if you want the location to persist across runs without re-running
+# that menu option (re-uploading is harmless either way — it's idempotent).
+rag_location_url = https://objectstorage.us-chicago-1.oraclecloud.com/n/<your-namespace>/b/acme-kb/o/
+
+# =============================================================================
+[llm]
+# LLM for agent reasoning and NL2SQL query generation
+# Use menu option 5 to see all available models and update this value
+# Note: picking a model from menu option 5 applies for the current session
+# only — it is not saved back to this file. Edit chat_model here directly
+# to make a change permanent across runs.
+# Example: meta.llama-3.3-70b-instruct
+chat_model = meta.llama-3.3-70b-instruct
+
+# Embedding model for RAG vector index creation — same session-only note
+# as chat_model applies if changed via menu option 5
+# Example: cohere.embed-multilingual-v3.0
+embed_model = cohere.embed-multilingual-v3.0
+
+# Builder conversation temperature — same session-only note as chat_model
+# 0.0 = fully deterministic, 1.0 = very creative
+# 0.1 for deterministic SQL; 0.3 is recommended for the guided setup wizard
+temperature = 0.1
+
+# Maximum tokens for LLM responses — same session-only note as chat_model
+# Do not go below 2000 — truncated PL/SQL output will break code generation
+max_tokens = 8000
+
+# =============================================================================
+[builder]
+# Directory where project specs are saved between sessions
+# One JSON file is created per project
+projects_dir = ./projects
+
+# Directory for session runtime logs
+# One timestamped log file is created per session
+log_dir = ./logs
+
+# Debug mode — enables detailed SQL, LLM call, and traceback logging
+# Set to true to write a .debug.log file alongside each project's run log
+# Can also be toggled from menu option 7 (Debug & diagnostics) — that
+# toggle applies for the current session only, not saved back to this file.
+debug = false
+
+# =============================================================================
+[de]
+# ── DE-only section — Data Scientists can leave this entire section blank ──
+# These fields enable the Admin Setup menu for Data Engineers.
+# If this section is absent the Admin Setup menu is not shown.
+
+# ADMIN TNS alias — use the _low service for ADMIN operations
+# Example: acmedw_low
+admin_dsn =
+
+# ADMIN database username
+admin_user = ADMIN
+
+# Your personal DE schema — used by Grant Audit to connect as you (not the
+# target schema) when verifying your own grants
+# Example: DE_USER
+de_schema =
+
+# Schema that owns the production source tables queried by NL2SQL
+# Example: ACME_CORP
+target_data_schema = ACME_CORP
+
+# Source tables for NL2SQL SELECT grant verification (Pre-flight check)
+# Comma-separated list of SCHEMA.TABLE — the exact tables the agent queries
+# If set, the Pre-flight check confirms you have direct (non-role) SELECT on each
+# Role-based grants are silently ignored by the NL2SQL engine — direct grants required
+# Example: ACME_CORP.ACME_GL_TRANSACTIONS, ACME_CORP.ACME_DEPARTMENTS
+# source_tables = ACME_CORP.ACME_GL_TRANSACTIONS, ACME_CORP.ACME_DEPARTMENTS
+
+# OCID of an OCI Vault secret containing the target schema's DB password.
+# This tool does not create Vaults, Keys, or Secrets — ask your DE team
+# for a Vault secret OCID for this schema and paste it here. Used by
+# "Create DB credential" (DBMS_CLOUD.CREATE_CREDENTIAL) and as one of the
+# builder's own fallback ways to obtain the DB password when connecting.
+secret_ocid =
+
+# Name of the OCI Vault credential in ADW (DBMS_CLOUD.CREATE_CREDENTIAL)
+# Defaults to <SCHEMA>_OML_CRED if not set — override here if your DE used
+# a different name
+# Example: ACME_OML_CRED
+oml_credential_name = ACME_OML_CRED
+
+# Password used by custom Python (OML4Py) tools to refresh their OML
+# token — only needed if a project has a custom tool with hardcoded
+# token-refresh PL/SQL. Oracle does not support retrieving a DBMS_CLOUD
+# credential's password back out via SQL, so it has to be supplied directly.
+#
+# LEAVE THIS BLANK. The builder then prompts for it (masked) whenever a
+# project needs it, and that path never writes the password to disk. Filling
+# it in works too and skips the prompt — but it then sits here in plaintext,
+# which is exactly what you do not want in a file you might commit.
+oml_password =
+
+# OML REST base URL — needed for pyqAppendHostAce (EPE network ACL)
+# Where to find: OCI Console → ADW → Database Actions → OML RESTful Services
+# Example: https://<db-id>-<dbname>.adb.<region>.oraclecloudapps.com
+oml_base_url =

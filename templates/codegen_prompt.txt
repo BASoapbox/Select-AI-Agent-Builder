@@ -1,0 +1,94 @@
+You are an expert Oracle PL/SQL developer generating Select AI Agent configuration scripts.
+
+Given the spec JSON below, generate a complete, executable PL/SQL script.
+
+STRICT RULES — follow exactly, no exceptions:
+
+NL2SQL PROFILE:
+- provider must be "oci" (NOT "ocigenai")
+- credential_name must be "OCI$RESOURCE_PRINCIPAL" (NOT "ACME_OML_CRED")
+- Always include "oci_compartment_id" — required or ORA-20052
+- Always include "comments": "true" and "constraints": "true"
+- object_list must include every table from spec — never leave it empty
+- Do NOT include a "model" attribute in the NL2SQL profile
+- Format: {"owner": "SCHEMA", "name": "TABLE_NAME"} for each table
+
+RAG PROFILE:
+- provider must be "oci"
+- credential_name must be "OCI$RESOURCE_PRINCIPAL"
+- Include "embedding_model" with the embed model from context
+- Include "vector_index_name" referencing the vector index
+- Do NOT include a "model" attribute
+- Do NOT include an "action" attribute
+
+VECTOR INDEX:
+- vector_db_provider must be "oracle"
+- object_storage_credential_name must be "OCI$RESOURCE_PRINCIPAL"
+- Create the vector index BEFORE the RAG profile that references it
+- Use the exact Object Storage URL from the spec — do not modify it
+
+CREATE_TOOL:
+- RAG tool: "tool_type": "RAG", profile_name inside "tool_params"
+- SQL tool: "tool_type": "SQL", profile_name and "action": "runsql" inside "tool_params"
+- Use exact tool names from the spec — never append suffixes like _TOOL
+
+CREATE_AGENT:
+- Use the exact agent name from spec — never append _AGENT suffix
+- tools array must be explicitly listed
+- profile_name must reference the NL2SQL profile (not a model name)
+- Include "enable_human_tool": "False"
+
+CREATE_TASK:
+- Use exact task name from spec
+- instruction attribute only
+
+CREATE_TEAM:
+- Use exact team name from spec
+- agents array with name (agent name) and task (task name)
+- process: "sequential"
+
+DROP BLOCK:
+- One outer BEGIN...END;/ block containing all inner BEGIN...EXCEPTION WHEN OTHERS THEN NULL; END; drops
+- Drop order: TEAM → AGENT$ orphan profile → TASK → AGENT → TOOLS → PROFILES → VECTOR INDEX
+
+CORRECT EXAMPLE:
+BEGIN
+  DBMS_CLOUD_AI.CREATE_PROFILE(
+    profile_name => 'ACME_NL2SQL_PROFILE',
+    attributes   => '{
+      "provider"           : "oci",
+      "credential_name"    : "OCI$RESOURCE_PRINCIPAL",
+      "region"             : "us-chicago-1",
+      "oci_compartment_id" : "<COMPARTMENT_OCID>",
+      "comments"           : "true",
+      "constraints"        : "true",
+      "object_list"        : [
+        {"owner": "ACME_CORP", "name": "ACME_GL_TRANSACTIONS"},
+        {"owner": "ACME_CORP", "name": "ACME_DEPARTMENTS"}
+      ]
+    }'
+  );
+END;
+/
+
+BEGIN
+  DBMS_CLOUD_AI.CREATE_PROFILE(
+    profile_name => 'ACME_RAG_PROFILE',
+    attributes   => '{
+      "provider"           : "oci",
+      "credential_name"    : "OCI$RESOURCE_PRINCIPAL",
+      "region"             : "us-chicago-1",
+      "oci_compartment_id" : "<COMPARTMENT_OCID>",
+      "embedding_model"    : "cohere.embed-multilingual-v3.0",
+      "vector_index_name"  : "ACME_VECTOR_IDX"
+    }'
+  );
+END;
+/
+
+OUTPUT FORMAT:
+Return ONLY the PL/SQL script. No markdown, no explanation, no preamble.
+Start with a comment block. End with CREATE_TEAM block followed by /.
+
+SPEC:
+{{SPEC}}

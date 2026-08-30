@@ -1,0 +1,39 @@
+{
+  "mode": "imported",
+  "status": "draft",
+  "objects": {
+    "ACME_CORP.ACME_GL_TRANSACTIONS": {
+      "table_comment": "ACME Corp General Ledger transactions. Contains financial postings including expenses and revenue. Join to ACME_DEPARTMENTS on DEPARTMENT_CODE and ACME_CHART_OF_ACCOUNTS on ACCOUNT_CODE.",
+      "columns": {
+        "PERIOD_NAME": "Accounting period in MON-YYYY format, for example JAN-2025 or AUG-2025. Q1=JAN/FEB/MAR, Q2=APR/MAY/JUN, Q3=JUL/AUG/SEP, Q4=OCT/NOV/DEC. Query the data to determine available periods; do not assume a fixed range.",
+        "ACCOUNT_TYPE": "Transaction category. Common values include EXPENSE, REVENUE, ASSET, LIABILITY, and EQUITY. Use EXPENSE for cost or spending questions.",
+        "DEPARTMENT_CODE": "Department code for the transaction. Join to ACME_DEPARTMENTS.DEPARTMENT_CODE to get the department name.",
+        "ACCOUNT_CODE": "Account code for the transaction. Join to ACME_CHART_OF_ACCOUNTS.ACCOUNT_CODE to get account name and account type.",
+        "DEBIT_AMOUNT": "For EXPENSE rows sum DEBIT_AMOUNT to calculate total expenses or spending.",
+        "CREDIT_AMOUNT": "Credit-side amount. Do not use this for expense totals unless the question explicitly asks about credits."
+      }
+    },
+    "ACME_CORP.ACME_DEPARTMENTS": {
+      "table_comment": "Department reference table for ACME Corp. Use to translate department codes into department names and organizational context.",
+      "columns": {
+        "DEPARTMENT_CODE": "Primary department code. Join to ACME_GL_TRANSACTIONS.DEPARTMENT_CODE.",
+        "DEPARTMENT_NAME": "Human-readable department name such as Finance, Engineering, Sales, Operations, Corporate, or Europe HQ."
+      }
+    },
+    "ACME_CORP.ACME_CHART_OF_ACCOUNTS": {
+      "table_comment": "Chart of accounts reference table. Use to map account codes to account names and financial categories.",
+      "columns": {
+        "ACCOUNT_CODE": "Primary account code. Join to ACME_GL_TRANSACTIONS.ACCOUNT_CODE.",
+        "ACCOUNT_NAME": "Human-readable account name.",
+        "ACCOUNT_TYPE": "Financial category such as EXPENSE or REVENUE."
+      }
+    },
+    "ACME_CORP.ACME_PERIOD_CLOSE": {
+      "table_comment": "Month-end close task tracking table. Use for close status, assignments, and completion questions.",
+      "columns": {
+        "PERIOD_NAME": "Accounting period in MON-YYYY format.",
+        "STATUS": "Close task status. Valid values include OPEN, IN_PROGRESS, and COMPLETE."
+      }
+    }
+  }
+}

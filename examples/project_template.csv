@@ -1,0 +1,23 @@
+Key | Value
+Project | My Agent Project
+Schema | MY_SCHEMA
+Data sources | Both
+RAG - Subject matter | Description of what the RAG knowledge base covers
+RAG - Object Storage URL | https://objectstorage.<region>.oraclecloud.com/n/<namespace>/b/<bucket>/o/<prefix>/
+RAG _ What file types are in the knowledge base? | PDF
+SQL - Which tables | TABLE1,TABLE2,TABLE3
+SQL - What questions users will ask | Description of the types of financial or operational questions users will ask
+RAG Profile | MY_RAG_PROFILE
+Vector Index | MY_VECTOR_INDEX
+Chunk Size | 1024
+Chunk Overlap | 128
+RAG Tool | MY_RAG_TOOL
+NL2SQL Profile | MY_NL2SQL_PROFILE
+SQL Tool | MY_SQL_TOOL
+NL2SQL Metadata Comments | False
+Additional Analysis tools | False
+Agent Name | MY_AGENT
+Agent Instructions | You are an AI assistant. Use the SQL tool for data questions. Use the RAG tool for policy questions. Only report figures returned by the tools. Never invent data.
+Task Instruction | Answer questions using only tool results. For data questions use the SQL tool. For policy or procedure questions use the RAG tool. If no data is returned say so. Never invent figures.
+Task Name | MY_AGENT_TASK
+Team Name | MY_AGENT_TEAM

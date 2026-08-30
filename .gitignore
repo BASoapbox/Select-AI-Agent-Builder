@@ -1,0 +1,29 @@
+# ── Never commit: contains tenancy OCIDs, wallet paths, usernames ──────────
+agent_builder_config.ini
+*.runtime.ini
+
+# ── Session output: transcripts of live DB sessions, real schema/table names,
+#    real query results. Regenerated on every run. ─────────────────────────
+logs/*
+!logs/.gitkeep
+projects/*
+!projects/.gitkeep
+
+# ── Oracle wallets and credentials ─────────────────────────────────────────
+wallet/
+*.sso
+*.p12
+tnsnames.ora
+sqlnet.ora
+
+# ── Python ─────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# ── OS / editor ────────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
