@@ -189,7 +189,11 @@ def _build_comments(spec: dict) -> list[str]:
 def _build_profiles(spec: dict, cfg) -> list[str]:
     blocks = []
     compartment = _get_compartment(cfg)
-    region = _get_region(cfg)
+    # NOTE: "region" is deliberately NOT emitted into profile attributes.
+    # Setting it to the database's own region makes the database build a
+    # malformed inference endpoint — every call fails with
+    #   ORA-20404: Object not found - https://inference.generativeai.<region>.oci.my$cloud_domain/...
+    # Omitting it lets the database resolve its own endpoint correctly.
     model = _get_model(cfg)
     embed_model = _get_embed_model(cfg)
 
@@ -202,7 +206,6 @@ def _build_profiles(spec: dict, cfg) -> list[str]:
             attrs = {
                 "provider": "oci",
                 "credential_name": "OCI$RESOURCE_PRINCIPAL",
-                "region": region,
                 "oci_compartment_id": compartment,
                 "model": p.get("model") or model,
                 "embedding_model": p.get("embed_model") or embed_model,
@@ -225,7 +228,6 @@ def _build_profiles(spec: dict, cfg) -> list[str]:
             attrs = {
                 "provider": "oci",
                 "credential_name": "OCI$RESOURCE_PRINCIPAL",
-                "region": region,
                 "oci_compartment_id": compartment,
                 "model": p.get("model") or model,
                 "comments": comments_enabled,
@@ -844,8 +846,22 @@ def _build_verification(spec: dict) -> list[str]:
         team = team_names[0]
         lines.append("")
         lines.append("-- Smoke tests (run manually after verifying objects are ENABLED)")
-        lines.append(f"SELECT DBMS_CLOUD_AI_AGENT.RUN_TEAM(team_name => '{_q(team)}', user_prompt => 'List the available tools and what each should be used for.', params => '{{\"conversation_id\": \"' || SYS_GUID() || '\"}}') AS response FROM dual;")
-        lines.append(f"SELECT DBMS_CLOUD_AI_AGENT.RUN_TEAM(team_name => '{_q(team)}', user_prompt => 'Answer a simple question using the correct tool. If no data is available, say so clearly.', params => '{{\"conversation_id\": \"' || SYS_GUID() || '\"}}') AS response FROM dual;")
+        # conversation_id must be the hyphenated 36-char UUID returned by
+        # DBMS_CLOUD_AI.CREATE_CONVERSATION. SYS_GUID() returns 32 hex chars
+        # with no hyphens and is rejected with ORA-20050.
+        for _prompt in ("List the available tools and what each should be used for.",
+                        "Answer a simple question using the correct tool. If no data is available, say so clearly."):
+            lines.append("DECLARE")
+            lines.append("  l_conv VARCHAR2(36);")
+            lines.append("  l_resp CLOB;")
+            lines.append("BEGIN")
+            lines.append("  l_conv := DBMS_CLOUD_AI.CREATE_CONVERSATION();")
+            lines.append(f"  l_resp := DBMS_CLOUD_AI_AGENT.RUN_TEAM(team_name => '{_q(team)}',")
+            lines.append(f"              user_prompt => '{_q(_prompt)}',")
+            lines.append("              params      => '{\"conversation_id\":\"' || l_conv || '\"}');")
+            lines.append("  DBMS_OUTPUT.PUT_LINE(SUBSTR(l_resp, 1, 3000));")
+            lines.append("END;")
+            lines.append("/")
     return ["\n".join(lines)]
 
 

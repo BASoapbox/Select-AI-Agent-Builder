@@ -369,21 +369,23 @@ def _check_source_table_grants(conn, cfg, db_user: str, r: CheckResult):
         parts = tbl.split(".")
         owner = parts[0] if len(parts) > 1 else ""
         tname = parts[-1]
+        # Test what actually matters: can this session read the table?
+        # Inspecting ALL_TAB_PRIVS gives false negatives — an owner holds
+        # implicit privileges and never appears there, and privileges held
+        # through an enabled role are also easy to miss. A read either works
+        # or it does not.
         try:
-            rows = _qall(conn, """
-                SELECT privilege FROM all_tab_privs
-                WHERE  grantee    = :g
-                  AND  table_name = :t
-                  AND  privilege  = 'SELECT'
-                  AND  (:o IS NULL OR table_schema = :o)
-            """, {"g": db_user, "t": tname, "o": owner or None})
-            if rows:
-                r.ok(f"Direct SELECT — {tbl}")
-            else:
-                r.fail(f"Direct SELECT — {tbl} — NOT granted",
-                       f"Ask DE: GRANT SELECT ON {tbl} TO {db_user};")
+            _qall(conn, f'SELECT 1 FROM {tbl} WHERE ROWNUM = 1')
+            r.ok(f"Readable — {tbl}")
         except Exception as ex:
-            r.warn(f"SELECT check failed for {tbl}", str(ex)[:100])
+            msg = str(ex)
+            if "ORA-00942" in msg or "ORA-01031" in msg:
+                r.fail(f"Readable — {tbl} — NO",
+                       f"Grant it directly:  GRANT SELECT ON {tbl} TO {db_user};  "
+                       f"or through a role, then ALTER USER {db_user} DEFAULT ROLE ALL "
+                       f"(a role must be enabled in the session to count).")
+            else:
+                r.warn(f"Read check failed for {tbl}", msg[:110])
 
 
 def _check_execute_grants(conn, db_user: str, packages: list, r: CheckResult):
