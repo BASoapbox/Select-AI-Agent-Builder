@@ -108,8 +108,13 @@ rag_location_url = https://objectstorage.us-chicago-1.oraclecloud.com/n/<your-na
 # Note: picking a model from menu option 5 applies for the current session
 # only — it is not saved back to this file. Edit chat_model here directly
 # to make a change permanent across runs.
-# Example: meta.llama-3.3-70b-instruct
-chat_model = meta.llama-3.3-70b-instruct
+# IMPORTANT: model availability is regional, and it changes. meta.llama-3.3-70b-instruct
+# is present in us-chicago-1 and us-phoenix-1 but NOT in us-ashburn-1, for example.
+# Verify before you rely on this value:
+#   oci generative-ai model-collection list-models -c <compartment-ocid> \
+#     --query 'data.items[?"lifecycle-state"==`ACTIVE`]."display-name"'
+# Example: meta.llama-4-maverick-17b-128e-instruct-fp8
+chat_model = meta.llama-4-maverick-17b-128e-instruct-fp8
 
 # Embedding model for RAG vector index creation — same session-only note
 # as chat_model applies if changed via menu option 5
@@ -122,8 +127,13 @@ embed_model = cohere.embed-multilingual-v3.0
 temperature = 0.1
 
 # Maximum tokens for LLM responses — same session-only note as chat_model
-# Do not go below 2000 — truncated PL/SQL output will break code generation
-max_tokens = 8000
+# Do not go below 2000 — truncated PL/SQL output will break code generation.
+# CHECK YOUR MODEL'S CEILING before raising this. Llama 4 models cap maxTokens
+# at 4096 and reject anything higher outright:
+#   HTTP 400 — Invalid 'maxTokens': Value is greater than maximum: 4096
+# That limit belongs to the model, not the profile, and the error comes back
+# from the inference endpoint without naming your configuration.
+max_tokens = 4000
 
 # =============================================================================
 [builder]
