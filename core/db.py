@@ -17,12 +17,22 @@ from core import config as cfg_module
 _password_cache: dict[str, str] = {}
 
 
+# Why the last Vault lookup returned nothing. A failed lookup is not fatal
+# — resolution continues to env vars and the prompt — but silence made a
+# missing SDK look identical to a missing secret.
+_vault_error: dict = {}
+
+
 def _fetch_password_from_vault(cfg, secret_ocid: str = "") -> str:
     """
     Try to retrieve a password from OCI Vault.
 
     If secret_ocid is not provided, uses [de] secret_ocid from config.
     Returns the password string, or an empty string if not configured/available.
+
+    Callers resolving a LOGIN password should pass an explicit secret_ocid
+    from _secret_ocid_for_user() — [de] secret_ocid describes one schema, not
+    whoever happens to be connecting.
     """
     secret_ocid = (secret_ocid or cfg_module.get(cfg, "de", "secret_ocid", fallback="")).strip()
     if not secret_ocid:
@@ -41,9 +51,56 @@ def _fetch_password_from_vault(cfg, secret_ocid: str = "") -> str:
         import base64
         bundle = secrets_client.get_secret_bundle(secret_ocid, stage="CURRENT").data
         encoded = bundle.secret_bundle_content.content
+        _vault_error.clear()
         return base64.b64decode(encoded).decode("utf-8").strip()
-    except Exception:
-        return ""  # fall through to env var / prompt
+    except ImportError:
+        # The oci SDK is not installed in THIS interpreter. Easy to hit when
+        # the tool is launched with a different python than the one the SDK
+        # was installed into, and invisible without this message.
+        _vault_error["why"] = "oci SDK not installed in this interpreter"
+        return ""
+    except Exception as ex:
+        # Still fall through to env var / prompt — Vault being unreachable
+        # should not be fatal — but keep the reason so it can be shown.
+        _vault_error["why"] = f"{type(ex).__name__}: {str(ex)[:160]}"
+        return ""
+
+
+def _secret_ocid_for_user(cfg, db_user: str) -> str:
+    """
+    Vault secret OCID holding THIS user's login password, or "".
+
+    Two sources, in order:
+
+      1. [secrets] <USERNAME>   — explicit per-user mapping. Preferred.
+      2. [de] secret_ocid       — legacy single OCID. Honoured ONLY when
+                                  db_user is the target schema it was created
+                                  for.
+
+    The second rule is the point of this function. [de] secret_ocid holds the
+    target schema's password: it is what DBMS_CLOUD.CREATE_CREDENTIAL is
+    handed when building the OML credential. Applying it to every login made
+    DS_USER and DE_USER resolve to the schema's password instead of their own
+    — and because Vault is consulted before the environment, that wrong value
+    silently beat a correct OCI_DB_PASSWORD_<USER>.
+    """
+    user = (db_user or "").strip().upper()
+    if not user:
+        return ""
+
+    if cfg is not None and cfg.has_section("secrets"):
+        for key, val in cfg.items("secrets"):
+            if key.strip().upper() == user and (val or "").strip():
+                return val.strip()
+
+    legacy = cfg_module.get(cfg, "de", "secret_ocid", fallback="").strip()
+    if not legacy:
+        return ""
+
+    target = (cfg_module.get(cfg, "de", "target_schema", fallback="").strip()
+              or cfg_module.get(cfg, "database", "target_schema",
+                                fallback="").strip()).upper()
+    return legacy if target and user == target else ""
 
 
 def _env_password_keys(db_user: str) -> list[str]:
@@ -68,7 +125,8 @@ def resolve_password(cfg, db_user: str, *,
 
     Resolution order:
       1. Session cache (if already resolved this session)
-      2. OCI Vault secret  ([de] secret_ocid)
+      2. OCI Vault secret  ([secrets] <USER>, or [de] secret_ocid
+         when db_user IS the target schema)
       3. OCI_DB_PASSWORD_<USER> environment variable
       4. OCI_DB_PASSWORD environment variable
       5. Interactive getpass prompt (if allow_prompt=True)
@@ -78,14 +136,19 @@ def resolve_password(cfg, db_user: str, *,
     if cache_key and cache_key in _password_cache:
         return _password_cache[cache_key]
 
-    # 2. Vault
-    password = _fetch_password_from_vault(cfg)
-    if password:
-        if not silent:
-            print(f"  Password for {db_user} retrieved from Vault")
-        if cache_key:
-            _password_cache[cache_key] = password
-        return password
+    # 2. Vault — only a secret that belongs to THIS user
+    user_secret = _secret_ocid_for_user(cfg, db_user)
+    if user_secret:
+        password = _fetch_password_from_vault(cfg, user_secret)
+        if password:
+            if not silent:
+                print(f"  Password for {db_user} retrieved from Vault")
+            if cache_key:
+                _password_cache[cache_key] = password
+            return password
+        if not silent and _vault_error.get("why"):
+            print(f"  Vault lookup for {db_user} failed "
+                  f"({_vault_error['why']}) — falling back")
 
     # 2 / 3. Environment variables
     for key in _env_password_keys(db_user):
@@ -103,7 +166,7 @@ def resolve_password(cfg, db_user: str, *,
                 print()
                 print(f"  │ Connecting to ADW as {db_user}")
                 print(f"  │ Password resolution order:")
-                print(f"  │   1. OCI Vault secret — set [de] secret_ocid in config")
+                print(f"  │   1. OCI Vault secret — set [secrets] {db_user} in config")
                 specific_key = _env_password_keys(db_user)[0]
                 print(f"  │   2. User-specific env — export {specific_key}=\"...\"")
                 print(f"  │   3. Generic env       — export OCI_DB_PASSWORD=\"...\"")
@@ -149,7 +212,7 @@ def connect(cfg):
       Example: DS_USER[ACME_CORP] — authenticates as DS_USER, runs as ACME_CORP.
 
     Password resolution order:
-      1. OCI Vault secret (if [de] secret_ocid is set in config)
+      1. OCI Vault secret for this user ([secrets] <USER>)
       2. User-specific environment variable, e.g. OCI_DB_PASSWORD_DS_USER
       3. OCI_DB_PASSWORD environment variable
       4. Interactive prompt

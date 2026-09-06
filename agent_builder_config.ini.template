@@ -164,8 +164,11 @@ admin_dsn =
 # ADMIN database username
 admin_user = ADMIN
 
-# Your personal DE schema — used by Grant Audit to connect as you (not the
-# target schema) when verifying your own grants
+# Your personal DE login — the user the DE pre-flight check connects as.
+# Leave this blank and the DE check falls back to [database] db_user, which
+# reports on the DS login and labels it a DE result. Create it with
+# sql/SA_06_de_user.sql, then set it here.
+# Password is read from OCI_DB_PASSWORD_<DE_SCHEMA>, or prompted for.
 # Example: DE_USER
 de_schema =
 
@@ -180,11 +183,15 @@ target_data_schema = ACME_CORP
 # Example: ACME_CORP.ACME_GL_TRANSACTIONS, ACME_CORP.ACME_DEPARTMENTS
 # source_tables = ACME_CORP.ACME_GL_TRANSACTIONS, ACME_CORP.ACME_DEPARTMENTS
 
-# OCID of an OCI Vault secret containing the target schema's DB password.
+# OCID of an OCI Vault secret containing the TARGET SCHEMA's DB password.
 # This tool does not create Vaults, Keys, or Secrets — ask your DE team
 # for a Vault secret OCID for this schema and paste it here. Used by
-# "Create DB credential" (DBMS_CLOUD.CREATE_CREDENTIAL) and as one of the
-# builder's own fallback ways to obtain the DB password when connecting.
+# "Create DB credential" (DBMS_CLOUD.CREATE_CREDENTIAL).
+#
+# For a LOGIN password, use the [secrets] section at the end of this file
+# instead. This key applies only when the user connecting IS target_schema:
+# it used to be handed to every login, so DS_USER and DE_USER silently
+# resolved to the schema's password rather than their own.
 secret_ocid =
 
 # Name of the OCI Vault credential in ADW (DBMS_CLOUD.CREATE_CREDENTIAL)
@@ -208,3 +215,22 @@ oml_password =
 # Where to find: OCI Console → ADW → Database Actions → OML RESTful Services
 # Example: https://<db-id>-<dbname>.adb.<region>.oraclecloudapps.com
 oml_base_url =
+
+
+# =============================================================================
+# [secrets] — per-user login passwords held in OCI Vault  (optional)
+# =============================================================================
+# One Vault secret OCID per database user, keyed by username. Consulted
+# before OCI_DB_PASSWORD_<USER>, so a user listed here never needs the
+# password in an environment variable or typed at a prompt.
+#
+# Distinct from [de] secret_ocid, which is the target schema's password and
+# is used to build the OML credential.
+#
+# A lookup that fails (secret deleted, IAM denies, oci SDK missing) is not
+# fatal — resolution falls through to the environment and the prompt, and
+# the reason is printed.
+
+[secrets]
+# DE_USER = ocid1.vaultsecret.oc1.<region>.<unique-id>
+# DS_USER = ocid1.vaultsecret.oc1.<region>.<unique-id>
