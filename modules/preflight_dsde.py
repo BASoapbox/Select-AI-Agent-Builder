@@ -17,6 +17,8 @@ connection proves the grant is in place; ORA-01017 proves it is missing.
 
 from __future__ import annotations
 import os
+import re
+import shutil
 from core import config as cfg_module
 from core import db as db_module
 
@@ -55,14 +57,45 @@ class CheckResult:
 
 _SENSITIVE_KEYS = {"compartment_ocid", "secret_ocid", "tenancy_ocid",
                    "adw_ocid"}
-_MAX_VAL_LEN = 52
+
+# Sensitive values are always clipped short — an OCID prefix is enough to
+# confirm the right one is configured, and the tail is what identifies the
+# tenancy. This clip is deliberate and does not widen with the terminal.
+_SENSITIVE_VAL_LEN = 20
+
+# Non-sensitive values (paths, DSNs) are clipped only to keep the line from
+# wrapping. The budget is the terminal width minus the fixed prefix:
+#   2 spaces + status glyph + 2 spaces + key padded to 22 + 1 space = 28
+_VALUE_COL = 28
+_MIN_VAL_LEN = 40
+
+
+def _value_budget() -> int:
+    """Characters available for a value on one unwrapped terminal line."""
+    try:
+        cols = shutil.get_terminal_size(fallback=(100, 24)).columns
+    except Exception:
+        cols = 100
+    return max(_MIN_VAL_LEN, cols - _VALUE_COL - 2)
+
+
+def _mask_namespace(val: str) -> str:
+    """
+    Hide the Object Storage tenancy namespace in a URL — the /n/<ns>/ segment.
+    Everything else (region, bucket, prefix) is what the DE needs to eyeball,
+    and the namespace is the one part that identifies the tenancy on camera.
+    """
+    return re.sub(r"(/n/)[^/]+(/)", r"\1…\2", val)
 
 
 def _display_value(key: str, val: str) -> str:
     if key in _SENSITIVE_KEYS:
-        return val[:20] + "…" if len(val) > 20 else val
-    if len(val) > _MAX_VAL_LEN:
-        return val[:_MAX_VAL_LEN] + "…"
+        return val[:_SENSITIVE_VAL_LEN] + "…" if len(val) > _SENSITIVE_VAL_LEN else val
+    if "/n/" in val:
+        val = _mask_namespace(val)
+    budget = _value_budget()
+    if len(val) > budget:
+        return val[:budget] + "…"
     return val
 
 
@@ -546,7 +579,7 @@ def run_ds(cfg, config_path: str, clients: dict, display):
 
     _print_section_box("DS Level Check", r_data.items, display)
     _footer(r_cfg, r_data, "DS",
-            "If checks fail — ask the DE to re-run SA_03_DS_grants.sql",
+            "If checks fail — ask the DE to re-run sql/SA_06_ds_user.sql",
             display)
 
 
@@ -558,13 +591,28 @@ def run_de(cfg, config_path: str, clients: dict, display):
     r_cfg  = CheckResult()
     r_data = CheckResult()
 
-    db_user       = cfg_module.get(cfg, "database", "db_user",
+    # The DE check must run as the DE's own login, not the DS login. They are
+    # provisioned differently on purpose — the DE holds DBMS_CLOUD /
+    # DBMS_CLOUD_ADMIN and the ANY-privileges, the DS holds neither. Running
+    # this as db_user would report on the DS user and call it a DE result.
+    de_user       = cfg_module.get(cfg, "de", "de_schema",
                                    fallback="").strip().upper()
-    target_schema = cfg_module.get(cfg, "database", "target_schema",
+    ds_user       = cfg_module.get(cfg, "database", "db_user",
                                    fallback="").strip().upper()
+    target_schema = (cfg_module.get(cfg, "de", "target_schema",
+                                    fallback="").strip().upper()
+                     or cfg_module.get(cfg, "database", "target_schema",
+                                       fallback="").strip().upper())
+
+    db_user = de_user or ds_user
 
     # Part 1: full config inventory
     can_connect = _check_config(DE_EXPECTED, cfg, r_cfg)
+    if not de_user:
+        r_cfg.warn(
+            f"{'de_schema':<22} not set — running as {ds_user}",
+            "This reports on the DS login, not a DE login. Set [de] de_schema\n"
+            "to the DE's own user to test DE provisioning separately.")
     _print_section_box("Config", r_cfg.items, display)
 
     if not can_connect:
@@ -596,7 +644,7 @@ def run_de(cfg, config_path: str, clients: dict, display):
 
     _print_section_box("DE Level Check", r_data.items, display)
     _footer(r_cfg, r_data, "DE",
-            "If checks fail — ask ADMIN to re-run SA_00_DE_grants.sql",
+            "If checks fail — ask ADMIN to re-run sql/SA_06_de_user.sql",
             display)
 
 
