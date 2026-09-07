@@ -421,31 +421,58 @@ def _check_source_table_grants(conn, cfg, db_user: str, r: CheckResult):
                 r.warn(f"Read check failed for {tbl}", msg[:110])
 
 
+# Each probe is a PL/SQL block that names the package inside dead code.
+# PL/SQL resolves every identifier when the block is COMPILED, so a missing
+# EXECUTE fails here with PLS-00201 — while "IF 1=0" guarantees nothing is
+# ever actually run. No side effects, and no dependence on a specific
+# function existing.
+#
+# Reading a view instead does NOT test the grant. USER_CLOUD_AI_PROFILES and
+# USER_AI_AGENT_TOOLS are public synonyms onto C##CLOUD$SERVICE views, and a
+# user holding nothing but CREATE SESSION can select from both — verified
+# against a throwaway user on 23.26.3.2.0. The earlier probes queried those
+# views (and DBMS_CLOUD_AI.LIST_PROFILES, which does not exist on this
+# release), so the check passed for every user whether granted or not.
+_PKG_PROBES = {
+    "DBMS_CLOUD_AI":
+        "BEGIN IF 1=0 THEN DBMS_CLOUD_AI.CLEAR_PROFILE; END IF; END;",
+    "DBMS_CLOUD_AI_AGENT":
+        "BEGIN IF 1=0 THEN DBMS_CLOUD_AI_AGENT.CLEAR_TEAM; END IF; END;",
+    # LIST_OBJECTS is a FUNCTION — calling it as a procedure fails on call
+    # form, not privilege, which reads as a false negative. Use a procedure.
+    "DBMS_CLOUD":
+        ("BEGIN IF 1=0 THEN DBMS_CLOUD.CREATE_CREDENTIAL("
+         "credential_name=>'x', username=>'y', password=>'z'); END IF; END;"),
+    "DBMS_CLOUD_ADMIN":
+        "BEGIN IF 1=0 THEN DBMS_CLOUD_ADMIN.DISABLE_APP_CONT('x'); END IF; END;",
+}
+
+# A missing EXECUTE surfaces as PLS-00201 (wrapped in ORA-06550) from a
+# PL/SQL block, not as ORA-01031. Matching only ORA-01031 meant a genuine
+# denial was reported as success.
+_NO_EXECUTE = ("PLS-00201", "ORA-01031")
+
+
 def _check_execute_grants(conn, db_user: str, packages: list, r: CheckResult):
-    PKG_TESTS = {
-        "DBMS_CLOUD_AI":
-            ("SELECT COUNT(*) FROM TABLE(DBMS_CLOUD_AI.LIST_PROFILES())", "query"),
-        "DBMS_CLOUD_AI_AGENT":
-            ("SELECT COUNT(*) FROM user_ai_agent_tools", "query"),
-        "DBMS_CLOUD":
-            ("BEGIN DBMS_CLOUD.LIST_OBJECTS('__pf__','__x__'); END;", "plsql"),
-        "DBMS_CLOUD_ADMIN":
-            ("SELECT COUNT(*) FROM dba_credentials WHERE rownum < 2", "query"),
-    }
     for pkg in packages:
-        test_sql, test_type = PKG_TESTS.get(pkg, ("SELECT 1 FROM DUAL", "query"))
+        probe = _PKG_PROBES.get(pkg)
+        if not probe:
+            r.skip(f"EXECUTE — {pkg} — no probe defined")
+            continue
         try:
-            cur = conn.cursor()
-            cur.execute(test_sql)
-            if test_type == "query":
-                cur.fetchone()
+            conn.cursor().execute(probe)
             r.ok(f"EXECUTE — {pkg}")
         except Exception as ex:
-            if "ORA-01031" in str(ex):
+            ex_str = str(ex)
+            if any(code in ex_str for code in _NO_EXECUTE):
                 r.fail(f"EXECUTE — {pkg} — NOT granted",
                        f"Ask DE: GRANT EXECUTE ON {pkg} TO {db_user};")
             else:
-                r.ok(f"EXECUTE — {pkg} (callable)")
+                # Package resolved — the grant is there; something else in
+                # the probe upset the compiler. Say so rather than claiming
+                # a clean pass.
+                r.warn(f"EXECUTE — {pkg} — granted, probe inconclusive",
+                       ex_str.split("\n")[0][:110])
 
 
 def _check_system_privs(cfg, db_user: str, password: str, privs: list, r: CheckResult):
