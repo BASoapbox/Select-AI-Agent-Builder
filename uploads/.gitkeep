@@ -1,0 +1,6 @@
+Put your own spec document here — the import step reads .docx files from this folder.
+
+Its contents are gitignored on purpose: a filled-in spec carries your ADB
+hostname, vault secret OCIDs and Object Storage namespace.
+
+Start from examples/sample_agent_spec.docx.

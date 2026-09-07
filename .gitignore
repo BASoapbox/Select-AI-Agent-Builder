@@ -30,4 +30,5 @@ venv/
 
 # Uploaded spec documents — contain real tenancy values (ADB hostname,
 # vault OCIDs, Object Storage namespace). Never publish.
-uploads/
+uploads/*
+!uploads/.gitkeep
