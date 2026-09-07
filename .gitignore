@@ -32,3 +32,8 @@ venv/
 # vault OCIDs, Object Storage namespace). Never publish.
 uploads/*
 !uploads/.gitkeep
+
+# Working documents — internal drafts and Oracle-tree copies. Only explicitly
+# named, sanitized files are published from here.
+docs/*
+!docs/ACME_AI_Chat_Implementation_Guide.docx
