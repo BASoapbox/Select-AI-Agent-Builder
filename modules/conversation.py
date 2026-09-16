@@ -2602,7 +2602,10 @@ def _generate_code(project: dict, cfg, clients: dict, display, run_log=None) -> 
         prompt += f"- Compartment OCID: {compartment}\n"
         prompt += f"- Chat model: {cfg_module.get(cfg, 'llm', 'chat_model')}\n"
         prompt += f"- Embed model: {cfg_module.get(cfg, 'llm', 'embed_model')}\n"
-        prompt += f"- Region: {cfg_module.get(cfg, 'oci', 'region')}\n"
+        # Region is deliberately not passed. A model given it tends to write a
+        # "region" profile attribute, which breaks every call when it names the
+        # database's own region (ORA-20404). The Object Storage URL in the spec
+        # already carries the region where one is genuinely needed.
 
         display.info("Generating PL/SQL script from spec via LLM...")
         try:

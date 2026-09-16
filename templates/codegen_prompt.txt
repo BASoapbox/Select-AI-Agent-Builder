@@ -7,6 +7,7 @@ STRICT RULES — follow exactly, no exceptions:
 NL2SQL PROFILE:
 - provider must be "oci" (NOT "ocigenai")
 - credential_name must be "OCI$RESOURCE_PRINCIPAL" (NOT "ACME_OML_CRED")
+- Do NOT include a "region" attribute — set to the database's own region it breaks every call with ORA-20404
 - Always include "oci_compartment_id" — required or ORA-20052
 - Always include "comments": "true" and "constraints": "true"
 - object_list must include every table from spec — never leave it empty
@@ -16,6 +17,7 @@ NL2SQL PROFILE:
 RAG PROFILE:
 - provider must be "oci"
 - credential_name must be "OCI$RESOURCE_PRINCIPAL"
+- Do NOT include a "region" attribute — same failure as the NL2SQL profile
 - Include "embedding_model" with the embed model from context
 - Include "vector_index_name" referencing the vector index
 - Do NOT include a "model" attribute
@@ -58,7 +60,6 @@ BEGIN
     attributes   => '{
       "provider"           : "oci",
       "credential_name"    : "OCI$RESOURCE_PRINCIPAL",
-      "region"             : "us-chicago-1",
       "oci_compartment_id" : "<COMPARTMENT_OCID>",
       "comments"           : "true",
       "constraints"        : "true",
@@ -77,7 +78,6 @@ BEGIN
     attributes   => '{
       "provider"           : "oci",
       "credential_name"    : "OCI$RESOURCE_PRINCIPAL",
-      "region"             : "us-chicago-1",
       "oci_compartment_id" : "<COMPARTMENT_OCID>",
       "embedding_model"    : "cohere.embed-multilingual-v3.0",
       "vector_index_name"  : "ACME_VECTOR_IDX"
