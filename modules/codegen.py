@@ -54,7 +54,13 @@ def generate_sql(project: dict, cfg, clients: dict, display, run_log=None) -> st
     try:
         codegen_prompt = _load_template("codegen_prompt.txt")
         spec_json = json.dumps(spec, indent=2)
-        prompt = f"{codegen_prompt}\n\nSPEC:\n{spec_json}"
+        # The template ends with "SPEC:\n{{SPEC}}". Substitute it, as
+        # modules/conversation.py does; appending instead sent the model a
+        # literal {{SPEC}} followed by a second SPEC section.
+        if "{{SPEC}}" in codegen_prompt:
+            prompt = codegen_prompt.replace("{{SPEC}}", spec_json)
+        else:
+            prompt = f"{codegen_prompt}\n\nSPEC:\n{spec_json}"
         llm_cfg = _llm_config(cfg)
         response = llm_module.chat(clients, llm_cfg, [{"role": "USER", "text": prompt}])
         sql = response.strip()
