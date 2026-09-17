@@ -29,9 +29,18 @@ COMMENT ON …  ────┘
 ```
 
 Everything is emitted by `core/sql_builder.py` as plain PL/SQL you can read,
-save, and re-run. The LLM is used for the *conversation*, never for generating
-the SQL — object names, table lists, and comment metadata come from captured
-facts, not from a model.
+save, and re-run. The model runs the *conversation*; it does not write the
+provisioning code. Object names, table lists, and comment metadata come from
+captured facts, so the same spec produces a byte-identical script every time.
+
+Two qualifications worth stating plainly:
+
+- If `sql_builder` fails, the tool falls back to asking the model for the script,
+  and prints a warning when it does. Read that output more carefully.
+- The agent you deploy still uses a model at run time. NL2SQL writes queries, and
+  query results and tool output are sent to the model to compose answers. What the
+  generator controls is what the agent is allowed to reach, not whether a model
+  sees your data.
 
 ---
 
@@ -67,12 +76,18 @@ local paths. Keep it that way.
 
 **2. Supply the database password out-of-band**
 
-No password goes in the config file. Resolution order:
+No password goes in the config file. Resolution order, per user:
 
-1. OCI Vault secret (`[de] secret_ocid`)
+1. OCI Vault secret mapped to that user — `[secrets] <USER> = <secret OCID>`
 2. `OCI_DB_PASSWORD_<USER>` environment variable
 3. `OCI_DB_PASSWORD` environment variable
 4. Interactive prompt
+
+`[de] secret_ocid` is different: it holds the *target schema's* password, used to
+create the OML credential, and is only used as a login password when the
+connecting user is that schema. A Vault lookup that fails is not fatal — the
+reason is printed and resolution continues. Vault lookups need the `oci` SDK in
+the interpreter you launch with.
 
 **3. Run**
 
@@ -112,7 +127,13 @@ target_schema = ACME_CORP    ← agent objects are created here
 This connects as `DS_USER[ACME_CORP]`. The session runs with `ACME_CORP`'s
 identity and privileges, the audit trail records `DS_USER`, and `ACME_CORP`'s
 password is never needed by anyone. It requires a one-time
-`ALTER USER ACME_CORP GRANT CONNECT THROUGH DS_USER;`.
+`ALTER USER ACME_CORP GRANT CONNECT THROUGH DS_USER;`, and
+`ALTER USER ACME_CORP DEFAULT ROLE ALL;` — without the second, a proxied session
+starts with no roles enabled and privileges held through a role disappear.
+
+DS and DE logins are deliberately separate accounts. `sql/SA_06_ds_user.sql` and
+`sql/SA_06_de_user.sql` (run as ADMIN) create each one with its grants and proxy
+connect. The DE login is named in `[de] de_schema`.
 
 Leave `target_schema` blank to connect directly as `db_user` instead.
 
@@ -121,8 +142,14 @@ Leave `target_schema` blank to connect directly as `db_user` instead.
 ## The menu
 
 **Pre-flight check** — three independent checks over the proxy connection:
-DS provisioning, DE provisioning, and target-schema configuration. Each failure
-prints the exact statement that fixes it. Read the symbols carefully:
+DS provisioning (as `[database] db_user`), DE provisioning (as `[de] de_schema`,
+falling back to `db_user` with a warning), and target-schema configuration. Each
+failure prints the exact statement that fixes it.
+
+The checks perform the operation rather than read the privilege views, which
+mislead in several ways: source-table access is a real `SELECT`, and package
+`EXECUTE` is proved by compiling a call that never runs. Read the symbols
+carefully:
 
 | | |
 |---|---|
@@ -137,7 +164,8 @@ prints the exact statement that fixes it. Read the symbols carefully:
   Steps 4, 5 and 7 are collected by the application, not the LLM, so object names
   are never silently renamed.
 - *Import from CSV* — see `examples/project_template.csv`.
-- *Import from Word doc* — a two-column `Field | Value` table. Any `COMMENT ON`
+- *Import from Word doc* — a two-column `Field | Value` table; start from
+  `examples/sample_agent_spec.docx`. Any `COMMENT ON`
   SQL blocks in the doc are parsed and stored as pre-approved NL2SQL comments.
   Choosing "Proceed" jumps straight to the final step without re-prompting.
 
@@ -153,6 +181,7 @@ Storage bucket and upload RAG documents.
 Resource Principal, package/role grants, `pyqAppendHostAce` EPE ACL, Vault
 credential, and DS/DE proxy grants. Every destructive step prints the SQL and
 asks before executing; `--dry-run` shows the statements without running them.
+It grants to DS and DE users but does not create them — use `sql/SA_06_*.sql`.
 
 ---
 
@@ -168,7 +197,9 @@ core/
   db.py             ADB connect (wallet + proxy), execute, query helpers
   llm.py            OCI GenAI chat completions
   oci_clients.py    OCI SDK client factory
-  spec_builder.py   Captured facts → normalised spec dict
+  spec_builder.py   Captured facts → normalized spec dict
+  spec_parser.py    Extracts the JSON spec block from model output
+  spec_validator.py Validates the spec's shape
   sql_builder.py    Deterministic PL/SQL generator — no LLM involved
   state.py          Project JSON save / load / list / resume, run logs
 
@@ -187,8 +218,11 @@ modules/
   debug_menu.py        Debug toggles and diagnostics
   check_config.py      Config file validator
 
-examples/     CSV project template, sample NL2SQL comment files
-templates/    LLM system prompt and codegen prompt
+sql/          SA_06_ds_user.sql / SA_06_de_user.sql — create the DS and DE logins
+examples/     Sanitized sample Word spec, CSV project template, NL2SQL comment files
+docs/         ACME_AI_Chat_Implementation_Guide.docx (other contents gitignored)
+templates/    LLM system prompt and the fallback codegen prompt
+uploads/      Your own spec documents (contents gitignored)
 projects/     Saved project specs and per-project logs (gitignored)
 logs/         Per-session runtime logs (gitignored)
 ```
@@ -221,24 +255,27 @@ because that lands in the project spec.
 
 | | |
 |---|---|
-| Role grants don't satisfy NL2SQL | `SELECT ANY TABLE` is silently ignored. Every source table needs an explicit `GRANT SELECT ON <table> TO <user>`. |
-| `UPDATE_PROFILE` not available | On ADB versions lacking it, the profile-attribute option drops and recreates the profile. If recreate fails, use Rebuild to restore from the saved spec. |
-| Generated smoke tests | The emitted verification block uses `SYS_GUID()` for the conversation id and fails with *Invalid value for conversation id*. The interactive test runner uses `CREATE_CONVERSATION` correctly — test there. |
+| Roles must be enabled | NL2SQL honors table privileges granted through a role, but only when the role is enabled in the session. A newly granted role is not a default role: run `ALTER USER <schema> DEFAULT ROLE ALL`. |
+| Attribute edits drop and recreate | The profile-attribute option drops and recreates the profile. `DBMS_CLOUD_AI.SET_ATTRIBUTE` exists and would change it in place; the tool does not use it yet. If recreate fails, use Rebuild to restore from the saved spec. |
 | `pyqGetHostAce` is ADMIN-only | The schema pre-flight EPE ACL check always shows ⚠ over a proxy connection. Verify as ADMIN. |
 | Tool history has no conversation id | `USER_AI_AGENT_TOOL_HISTORY` has no `conversation_id` column, so the test runner correlates invocations using a 30-second time window. |
-| Model truncation | Some fast/non-reasoning models cut off long structured output regardless of `max_tokens`, which breaks PL/SQL generation. Prefer a reasoning/instruct model and keep `max_tokens` at 8000+. |
+| Model truncation | Some fast models cut off long structured output regardless of `max_tokens`. That only affects script generation if it falls back to the model — `sql_builder` is not affected. |
 
 ---
 
 ## Security notes
 
 - No secrets in the repo: `agent_builder_config.ini`, `*.runtime.ini`, wallets,
-  `logs/`, and `projects/` are all gitignored.
+  `logs/`, `projects/`, `uploads/` and working files in `docs/` are all gitignored.
+  A filled-in spec document carries your ADB hostname, Vault OCIDs and Object
+  Storage namespace — keep it in `uploads/`.
 - `logs/` and `projects/` capture live session transcripts, real schema and table
   names, and query results. Check before you ever commit or share them.
-- `[de] oml_password` exists for OML4Py custom tools whose token-refresh PL/SQL
-  needs the schema password inline. **Leave it blank** — the builder then prompts
-  for it (masked) and never writes it to disk.
+- OML4Py tool bodies should read the schema password from OCI Vault at run time,
+  as the Python tool in `examples/sample_agent_spec.docx` does. The builder only
+  asks for `[de] oml_password` when a tool body still contains a
+  `<SET … PASSWORD HERE>` placeholder. **Leave it blank** — it then prompts
+  (masked) and never writes the value to disk.
 - The Admin Setup menu executes real DDL and creates real IAM resources. Use
   `--dry-run` first.
 
@@ -255,6 +292,15 @@ python agent_builder.py --dry-run                # admin actions print, don't ex
 
 ---
 
+## Further reading
+
+- `docs/ACME_AI_Chat_Implementation_Guide.docx` — the full build this tool automates,
+  with every sample question run against a deployed agent
+- [Building an AI Financial Analyst with Oracle Select AI Agent](https://basoapbox.com/blog/select-ai-agent-part1)
+  — a five-part series; Part 5 covers this builder
+
+---
+
 ## License
 
-No license is granted yet — add one before relying on this in your own work.
+Universal Permissive License (UPL), Version 1.0 — see `LICENSE`.
