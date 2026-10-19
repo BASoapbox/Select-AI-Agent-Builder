@@ -470,18 +470,19 @@ END {log_error_fn};
 """
     blocks.append(_raw_block("Vault secret reader and error logger for Python tools", vault_ddl))
 
-    # Register/refresh the Python script in the OML4Py repository.
+    # Register/refresh the Python script in the OML4Py repository, as a
+    # user (not global) script with overwrite on, so regenerating a tool
+    # replaces its script. Without overwrite a second run fails with
+    # ORA-20000 "script name conflict"; a drop first does not help, because
+    # pyqScriptDrop(name, TRUE) targets a global script and fails on this one.
     if python_script:
         script_ddl = f"""
 BEGIN
-    BEGIN
-        sys.pyqScriptDrop('{pyqscript}', TRUE);
-    EXCEPTION WHEN OTHERS THEN NULL;
-    END;
-
     sys.pyqScriptCreate(
         '{pyqscript}',
-'{python_script}'
+'{python_script}',
+        FALSE,  -- global: no, owned by this schema
+        TRUE    -- overwrite: replace the script on re-run
     );
 END;
 /
