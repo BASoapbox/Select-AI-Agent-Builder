@@ -100,7 +100,7 @@ def _check_oci(cfg, clients, r: CheckResult):
         ("object-family",        "genaiagent",
          "OCI GenAI Agent → Object Storage (read PDFs)"),
         ("secret-bundles",       "autonomousdatabase",
-         "ADW → Vault (read OML credential secret)"),
+         "ADW → Vault (Python tools read the schema password)"),
     ]
 
     # Compartment reachable
@@ -273,8 +273,8 @@ def _query_all(conn, sql, params=None):
 
 def _check_adw(cfg, r: CheckResult, db_user_override: str = ""):
     db_user     = (db_user_override or cfg_module.get(cfg, "database", "db_user") or "").strip().upper()
-    cred_name   = cfg_module.get(cfg, "de", "oml_credential_name",
-                                 fallback=f"{db_user}_OML_CRED")
+    secret_ocid = cfg_module.get(cfg, "de", "secret_ocid", fallback="")
+    region      = cfg_module.get(cfg, "oci", "region", fallback="")
     oml_host    = cfg_module.get(cfg, "preflight", "oml_host", fallback="")
 
     # Required EXECUTE grants
@@ -467,25 +467,37 @@ def _check_adw(cfg, r: CheckResult, db_user_override: str = ""):
         except Exception as ex:
             r.warn("Network ACE check failed", str(ex)[:100])
 
-        # ── Vault credential ──────────────────────────────────────────────────
-        try:
-            cred_rows = _query_all(conn, """
-                SELECT credential_name, username, enabled
-                FROM   user_credentials
-                WHERE  credential_name = :cn
-            """, {"cn": cred_name.upper()})
-            if cred_rows:
-                c = cred_rows[0]
-                enabled = str(c.get("enabled", "")).upper()
-                if enabled == "TRUE" or enabled == "YES" or enabled == "1":
-                    r.ok(f"Vault credential '{cred_name}' exists and is enabled")
+        # ── Vault read (Python tools) ─────────────────────────────────────────
+        # Generated Python tools read the schema password from Vault on every
+        # call, through the Resource Principal. Prints the HTTP status only.
+        if not secret_ocid:
+            r.warn("Vault read for Python tools — skipped, [de] secret_ocid not set",
+                   "Only needed if the project has a custom Python tool")
+        else:
+            try:
+                cur    = conn.cursor()
+                status = cur.var(int)
+                cur.execute("""
+                    DECLARE
+                        v_resp DBMS_CLOUD_TYPES.resp;
+                    BEGIN
+                        v_resp := DBMS_CLOUD.SEND_REQUEST(
+                            credential_name => 'OCI$RESOURCE_PRINCIPAL',
+                            uri             => 'https://secrets.vaults.' || :region
+                                            || '.oci.oraclecloud.com/20190301/secretbundles/'
+                                            || :secret_ocid,
+                            method          => 'GET');
+                        :status := DBMS_CLOUD.GET_RESPONSE_STATUS_CODE(v_resp);
+                    END;
+                """, {"region": region, "secret_ocid": secret_ocid, "status": status})
+                code = status.getvalue()
+                if code == 200:
+                    r.ok(f"Vault read for Python tools — HTTP {code}")
                 else:
-                    r.warn(f"Vault credential '{cred_name}' exists but may be disabled")
-            else:
-                r.fail(f"Vault credential '{cred_name}' not found",
-                       "Ask DE to run DBMS_CLOUD.CREATE_CREDENTIAL with the Vault secret OCID")
-        except Exception as ex:
-            r.warn(f"Vault credential check failed", str(ex)[:100])
+                    r.fail(f"Vault read for Python tools — HTTP {code}",
+                           "Ask DE for an IAM policy letting this ADW read the secret bundle")
+            except Exception as ex:
+                r.fail("Vault read for Python tools failed", str(ex)[:100])
 
         # ── Proxy authentication ─────────────────────────────────────────────
         target_schema = cfg_module.get(cfg, "database", "target_schema",
@@ -656,8 +668,8 @@ def run(cfg, config_path: str, clients: dict, display):
 
     # Check for DBMS_CLOUD (needed for Object Storage uploads / RAG)
     rag_items   = [s for s,l,d in r.items if "DBMS_CLOUD" in l and s == CheckResult.OK]
-    rag_bucket  = [s for s,l,d in r.items if "Vault credential" in l and s == CheckResult.OK]
-    rag_ok      = bool(rag_items) and bool(rag_bucket)
+    rag_rp      = [s for s,l,d in r.items if "Resource Principal" in l and s == CheckResult.OK]
+    rag_ok      = bool(rag_items) and bool(rag_rp)
 
     # Check agent framework views (needed to create agent resources)
     agent_views = [s for s,l,d in r.items
@@ -674,7 +686,7 @@ def run(cfg, config_path: str, clients: dict, display):
     else:
         missing_rag = []
         if not rag_items:   missing_rag.append("EXECUTE on DBMS_CLOUD")
-        if not rag_bucket:  missing_rag.append("Vault credential")
+        if not rag_rp:      missing_rag.append("Resource Principal")
         print(f"  {C.YELLOW}⚠{C.RESET}  {C.BOLD}Object Storage / RAG{C.RESET}  — "
               f"not fully ready ({', '.join(missing_rag)} needed)")
 

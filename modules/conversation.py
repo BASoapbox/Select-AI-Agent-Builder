@@ -394,9 +394,9 @@ def _silent_preflight(cfg, clients, display):
         rag_grants  = [s for s, l, d in r.items
                        if "DBMS_CLOUD" in l and "AI" not in l
                        and s == CheckResult.OK]
-        rag_cred    = [s for s, l, d in r.items
-                       if "Vault credential" in l and s == CheckResult.OK]
-        rag_ok      = bool(rag_grants) and bool(rag_cred)
+        rag_rp      = [s for s, l, d in r.items
+                       if "Resource Principal" in l and s == CheckResult.OK]
+        rag_ok      = bool(rag_grants) and bool(rag_rp)
 
         agent_grants = [s for s, l, d in r.items
                         if "DBMS_CLOUD_AI" in l and s == CheckResult.OK]
@@ -417,7 +417,7 @@ def _silent_preflight(cfg, clients, display):
         else:
             missing = []
             if not rag_grants: missing.append("EXECUTE on DBMS_CLOUD")
-            if not rag_cred:   missing.append("Vault credential")
+            if not rag_rp:     missing.append("Resource Principal")
             print(f"  {C.YELLOW}⚠{C.RESET}  {C.BOLD}Object Storage / RAG{C.RESET}"
                   f"  — not fully ready ({', '.join(missing)} needed)")
 

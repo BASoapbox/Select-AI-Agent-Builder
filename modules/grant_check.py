@@ -11,7 +11,7 @@ own DE schema with DBA-level access) and inspects:
   2. The DS schema's role grants (PYQADMIN, OML_DEVELOPER)
   3. Resource Principal enablement for the DS schema
   4. Network ACE (pyqAppendHostAce) for the DS schema
-  5. Vault credential in the DS schema
+  5. Vault read for Python tools (Resource Principal → [de] secret_ocid)
   6. Agent framework view accessibility
   7. Cross-schema SELECT grants from DS schema → target data schema (acme_corp)
   8. Optional: COMMENT ON privilege on the target data schema
@@ -353,48 +353,52 @@ def _check_network_ace(conn, ds_schema: str) -> list[GrantItem]:
     return items
 
 
-def _check_vault_credential(conn, ds_schema: str, cred_name: str) -> list[GrantItem]:
-    """Check that the Vault credential exists in the DS schema."""
-    items = []
-    try:
-        row = _qone(conn, """
-            SELECT credential_name, username, enabled
-            FROM   dba_credentials
-            WHERE  owner           = :schema
-            AND    credential_name = :cred
-        """, {"schema": ds_schema, "cred": cred_name.upper()})
-
-        if row:
-            enabled = str(row.get("enabled", "")).upper()
-            status  = GrantItem.OK if enabled in ("TRUE", "YES", "1") else GrantItem.WARN
-            items.append(GrantItem(
-                status,
-                f"Vault credential '{cred_name}' in {ds_schema} — "
-                f"{'enabled' if status == GrantItem.OK else 'exists but may be disabled'}",
-            ))
-        else:
-            items.append(GrantItem(
-                GrantItem.FAIL,
-                f"Vault credential '{cred_name}' not found in {ds_schema}",
-                "Required for OML token refresh and OCI service calls.",
-                fix_sql=(
-                    f"-- Run as ADMIN or as {ds_schema}:\n"
-                    f"BEGIN\n"
-                    f"  DBMS_CLOUD.CREATE_CREDENTIAL(\n"
-                    f"    credential_name => '{cred_name}',\n"
-                    f"    username        => '{ds_schema}',\n"
-                    f"    password        => '<vault-secret-ocid>'\n"
-                    f"  );\n"
-                    f"END;\n/"
-                ),
-            ))
-    except Exception as ex:
-        items.append(GrantItem(
+def _check_vault_read(conn, secret_ocid: str, region: str) -> list[GrantItem]:
+    """Check the database can read [de] secret_ocid from Vault with its
+    Resource Principal, as generated Python tools do on every call.
+    Read-only, and only the HTTP status is looked at — never the secret."""
+    if not secret_ocid:
+        return [GrantItem(
             GrantItem.WARN,
-            "Vault credential — could not query DBA_CREDENTIALS",
-            str(ex)[:120],
-        ))
-    return items
+            "Vault read for Python tools — skipped, [de] secret_ocid not set",
+            "Only needed if the project has a custom Python tool.",
+        )]
+    fix_sql = (
+        "-- IAM policy statement (OCI Console → Identity → Policies):\n"
+        "allow any-user to read secret-bundles in compartment <compartment>\n"
+        "  where all {request.principal.type = 'autonomousdatabase',\n"
+        "             request.principal.id = '<adw-ocid>',\n"
+        "             target.secret.id = '<vault-secret-ocid>'}"
+    )
+    try:
+        cur    = conn.cursor()
+        status = cur.var(int)
+        cur.execute("""
+            DECLARE
+                v_resp DBMS_CLOUD_TYPES.resp;
+            BEGIN
+                v_resp := DBMS_CLOUD.SEND_REQUEST(
+                    credential_name => 'OCI$RESOURCE_PRINCIPAL',
+                    uri             => 'https://secrets.vaults.' || :region
+                                    || '.oci.oraclecloud.com/20190301/secretbundles/'
+                                    || :secret_ocid,
+                    method          => 'GET');
+                :status := DBMS_CLOUD.GET_RESPONSE_STATUS_CODE(v_resp);
+            END;
+        """, {"region": region, "secret_ocid": secret_ocid, "status": status})
+        code = status.getvalue()
+        if code == 200:
+            return [GrantItem(GrantItem.OK, f"Vault read for Python tools — HTTP {code}")]
+        return [GrantItem(GrantItem.FAIL, f"Vault read for Python tools — HTTP {code}",
+                          "The database cannot read the schema password from Vault.",
+                          fix_sql=fix_sql)]
+    except Exception as ex:
+        return [GrantItem(
+            GrantItem.FAIL,
+            "Vault read for Python tools failed",
+            str(ex)[:120] + " — ORA-20404 usually means a wrong OCID or no IAM policy.",
+            fix_sql=fix_sql,
+        )]
 
 
 def _check_agent_views(conn, ds_schema: str) -> list[GrantItem]:
@@ -605,7 +609,7 @@ def _check_comment_privilege(conn, ds_schema: str,
 # ── Main check function ───────────────────────────────────────────────────────
 
 def run_grant_check(cfg, ds_schema: str, data_schema: str,
-                    cred_name: str, conn) -> GrantReport:
+                    secret_ocid: str, conn) -> GrantReport:
     """Run all grant checks and return a GrantReport.
 
     conn must be an ADMIN-level or DE-level connection with access to
@@ -631,8 +635,9 @@ def run_grant_check(cfg, ds_schema: str, data_schema: str,
         _check_network_ace(conn, ds_schema)
     )
     report.add_section(
-        f"Vault Credential in {ds_schema}",
-        _check_vault_credential(conn, ds_schema, cred_name)
+        "Vault Read for Python Tools",
+        _check_vault_read(conn, secret_ocid,
+                          cfg_module.get(cfg, "oci", "region", fallback=""))
     )
     report.add_section(
         "Agent Framework Views",
@@ -783,9 +788,7 @@ def run(cfg, clients: dict, display) -> None:
     if not data_schema:
         data_schema = default_data
 
-    cred_name = cfg_module.get(
-        cfg, "de", "oml_credential_name", fallback=f"{data_schema}_OML_CRED"
-    )
+    secret_ocid = cfg_module.get(cfg, "de", "secret_ocid", fallback="")
 
     # ── Connect for the audit ─────────────────────────────────────────────────
     # Preference: ADMIN connection (full DBA_* view access, most accurate).
@@ -879,7 +882,7 @@ def run(cfg, clients: dict, display) -> None:
     display.blank()
     display.info(f"Auditing {ds_schema} → {data_schema}...")
     try:
-        report = run_grant_check(cfg, ds_schema, data_schema, cred_name, conn)
+        report = run_grant_check(cfg, ds_schema, data_schema, secret_ocid, conn)
         print_report(report, display)
     except Exception as ex:
         display.err(f"Grant audit failed: {ex}")

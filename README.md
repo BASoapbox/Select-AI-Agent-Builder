@@ -83,9 +83,9 @@ No password goes in the config file. Resolution order, per user:
 3. `OCI_DB_PASSWORD` environment variable
 4. Interactive prompt
 
-`[de] secret_ocid` is different: it holds the *target schema's* password, used to
-create the OML credential, and is only used as a login password when the
-connecting user is that schema. A Vault lookup that fails is not fatal — the
+`[de] secret_ocid` is different: it holds the *target schema's* password, which
+generated Python tools read from Vault at run time to refresh their OML token,
+and is only used as a login password when the connecting user is that schema. A Vault lookup that fails is not fatal — the
 reason is printed and resolution continues. Vault lookups need the `oci` SDK in
 the interpreter you launch with.
 
@@ -178,8 +178,9 @@ the saved spec, or run an interactive multi-turn test conversation against a tea
 Storage bucket and upload RAG documents.
 
 **Admin Setup** (DE only) — IAM dynamic group and policy, schema creation,
-Resource Principal, package/role grants, `pyqAppendHostAce` EPE ACL, Vault
-credential, and DS/DE proxy grants. Every destructive step prints the SQL and
+Resource Principal, package/role grants, `pyqAppendHostAce` EPE ACL, a
+read-only check that the database can read `[de] secret_ocid` from Vault, and
+DS/DE proxy grants. Every destructive step prints the SQL and
 asks before executing; `--dry-run` shows the statements without running them.
 It grants to DS and DE users but does not create them — use `sql/SA_06_*.sql`.
 
@@ -272,7 +273,10 @@ because that lands in the project spec.
 - `logs/` and `projects/` capture live session transcripts, real schema and table
   names, and query results. Check before you ever commit or share them.
 - OML4Py tool bodies should read the schema password from OCI Vault at run time,
-  as the Python tool in `examples/sample_agent_spec.docx` does. The builder only
+  as the Python tool in `examples/sample_agent_spec.docx` does. Python tools the
+  builder generates do this themselves, from `[de] secret_ocid`, through the
+  database's Resource Principal. Nothing reads a DBMS_CLOUD credential's password
+  back: on 26ai that is not possible. The builder only
   asks for `[de] oml_password` when a tool body still contains a
   `<SET … PASSWORD HERE>` placeholder. **Leave it blank** — it then prompts
   (masked) and never writes the value to disk.

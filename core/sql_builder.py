@@ -352,11 +352,18 @@ def _build_oml_python_tool(tool: dict, spec: dict, cfg) -> list[str]:
         hostname baked into the function body.
       - The OAuth POST body uses the PL/SQL USER built-in for the username,
         not a hardcoded schema name — works unchanged in any schema.
-      - The credential name defaults to "<SCHEMA>_OML_CRED" but can be
-        overridden per tool; credential CREATION is intentionally NOT
-        generated here (a real password has no business sitting in
-        generated SQL) — it's a one-time Admin Setup → Vault Credential
-        step the builder already supports elsewhere.
+      - The password for the token request is read from OCI Vault on
+        every call ([de] secret_ocid), through the database's own
+        Resource Principal — never stored in the generated SQL and never
+        copied into a DBMS_CLOUD credential. On 26ai a DBMS_CLOUD
+        credential's password cannot be read back out (no view exposes
+        it), so the older pattern of reading it from
+        user_cloud_credential_attrs cannot work. The Vault secret OCID
+        and region are identifiers, not secrets, so they are safe to
+        emit; the policy that lets the database read the secret is
+        checked by Admin Setup → Check Vault access.
+      - Error logging goes through an autonomous procedure: the agent
+        calls the wrapper from SQL, where direct DML fails (ORA-14551).
       - The data/parameter payload is built with JSON_OBJECT(...) rather
         than manual string concatenation + REPLACE-based quote escaping.
         JSON_OBJECT lets Oracle handle escaping correctly and is the more
@@ -381,7 +388,8 @@ def _build_oml_python_tool(tool: dict, spec: dict, cfg) -> list[str]:
     python_script = (tool.get("python_script") or "").strip()
     data_query    = (tool.get("data_query") or "").strip()
     schema        = (spec.get("schema") or "").strip().upper() or "<SCHEMA>"
-    cred_name     = (tool.get("credential_name") or f"{schema}_OML_CRED").strip().upper()
+    get_secret_fn = f"{schema}_GET_SECRET".lower()
+    log_error_fn  = f"{schema}_LOG_ERROR".lower()
     # Explicit override (project-level, set once for all custom tools in
     # this project) takes priority over the schema-derived default — lets
     # a generated tool share an error log table that already exists from
@@ -389,12 +397,20 @@ def _build_oml_python_tool(tool: dict, spec: dict, cfg) -> list[str]:
     error_log = (spec.get("error_log_table") or f"{schema}_ERROR_LOG").strip().upper()
 
     oml_base_url = ""
+    secret_ocid  = ""
+    region       = "us-chicago-1"
     if cfg is not None:
         oml_base_url = cfg_module.get(cfg, "de", "oml_base_url", fallback="").strip()
+        secret_ocid  = cfg_module.get(cfg, "de", "secret_ocid", fallback="").strip()
+        region       = _get_region(cfg)
     token_url_literal = (
         f"'{oml_base_url.rstrip('/')}/omlusers/api/oauth2/v1/token'"
         if oml_base_url else
         "'<SET [de] oml_base_url IN CONFIG AND REGENERATE>'"
+    )
+    secret_ocid_literal = (
+        f"'{secret_ocid}'" if secret_ocid else
+        "'<SET [de] secret_ocid IN CONFIG AND REGENERATE>'"
     )
 
     params = tool.get("params") or _parse_param_spec(tool.get("param_spec", ""))
@@ -413,6 +429,46 @@ def _build_oml_python_tool(tool: dict, spec: dict, cfg) -> list[str]:
     # tools in this project rather than one log table per tool.
     error_log_ddl = _build_error_log_ddl(error_log)
     blocks.append(_raw_block(f"Error log table for custom tools (shared, created once)", error_log_ddl))
+
+    # Vault read + autonomous error logging, shared by every generated
+    # Python tool in this schema. CREATE OR REPLACE, so emitting them once
+    # per tool is harmless.
+    vault_ddl = f"""
+-- Reads a secret from OCI Vault with the database's own Resource Principal.
+-- Needs an IAM policy letting this database read this secret's bundle.
+CREATE OR REPLACE FUNCTION {get_secret_fn}(p_secret_ocid IN VARCHAR2)
+RETURN VARCHAR2 IS
+    v_resp DBMS_CLOUD_TYPES.resp;
+    v_b64  VARCHAR2(32767);
+BEGIN
+    v_resp := DBMS_CLOUD.SEND_REQUEST(
+        credential_name => 'OCI$RESOURCE_PRINCIPAL',
+        uri             => 'https://secrets.vaults.{region}.oci.oraclecloud.com'
+                        || '/20190301/secretbundles/' || p_secret_ocid,
+        method          => 'GET');
+    v_b64 := JSON_VALUE(DBMS_CLOUD.GET_RESPONSE_TEXT(v_resp),
+                        '$.secretBundleContent.content');
+    IF v_b64 IS NULL THEN RETURN NULL; END IF;
+    RETURN UTL_RAW.CAST_TO_VARCHAR2(
+               UTL_ENCODE.BASE64_DECODE(UTL_RAW.CAST_TO_RAW(v_b64)));
+END {get_secret_fn};
+/
+
+-- A function called from SQL cannot do DML directly (ORA-14551).
+CREATE OR REPLACE PROCEDURE {log_error_fn}(
+    p_source IN VARCHAR2,
+    p_msg    IN VARCHAR2,
+    p_detail IN VARCHAR2 DEFAULT NULL
+) IS
+    PRAGMA AUTONOMOUS_TRANSACTION;
+BEGIN
+    INSERT INTO {error_log}(error_source, error_msg, error_detail)
+    VALUES(p_source, p_msg, p_detail);
+    COMMIT;
+END {log_error_fn};
+/
+"""
+    blocks.append(_raw_block("Vault secret reader and error logger for Python tools", vault_ddl))
 
     # Register/refresh the Python script in the OML4Py repository.
     if python_script:
@@ -443,18 +499,18 @@ CREATE OR REPLACE FUNCTION {fn_l}({sig}
     v_par_lst  VARCHAR2(32767);
     v_token    VARCHAR2(32767);
     v_resp     CLOB;
+    v_http     DBMS_CLOUD_TYPES.resp;
     v_pwd      VARCHAR2(500);
+    v_errmsg   VARCHAR2(4000);
 BEGIN
     -- Step 1: auto-refresh OML token (handles the ~60-minute token expiry
     -- without requiring a manual pyqSetAuthToken call before every use)
     BEGIN
-        SELECT cred_attribute_value
-        INTO   v_pwd
-        FROM   user_cloud_credential_attrs
-        WHERE  credential_name     = '{cred_name}'
-        AND    cred_attribute_name = 'PASSWORD';
+        -- Read from OCI Vault on every call, never stored in the database.
+        -- A DBMS_CLOUD credential's password cannot be read back on 26ai.
+        v_pwd := {get_secret_fn}({secret_ocid_literal});
 
-        v_resp := DBMS_CLOUD.SEND_REQUEST(
+        v_http := DBMS_CLOUD.SEND_REQUEST(
             credential_name => 'OCI$RESOURCE_PRINCIPAL',
             uri             => {token_url_literal},
             method          => 'POST',
@@ -466,23 +522,21 @@ BEGIN
                                        'password'   VALUE v_pwd
                                    )
                                )
-        ).text;
-
+        );
+        v_resp  := DBMS_CLOUD.GET_RESPONSE_TEXT(v_http);
         v_token := JSON_VALUE(v_resp, '$.accessToken');
 
         IF v_token IS NOT NULL THEN
             pyqSetAuthToken(v_token);
         ELSE
-            INSERT INTO {error_log}(error_source, error_msg, error_detail)
-            VALUES('{function_name}', 'OML token refresh returned null token',
-                   SUBSTR(v_resp, 1, 4000));
-            COMMIT;
+            {log_error_fn}('{function_name}', 'OML token refresh returned null token',
+                SUBSTR(v_resp, 1, 4000));
         END IF;
     EXCEPTION
         WHEN OTHERS THEN
-            INSERT INTO {error_log}(error_source, error_msg)
-            VALUES('{function_name} — token refresh', SQLERRM);
-            COMMIT;
+            -- SQLERRM cannot appear inside a SQL statement; assign it first.
+            v_errmsg := SQLERRM;
+            {log_error_fn}('{function_name} — token refresh', v_errmsg);
     END;
 
     -- Step 2: build the data payload (tool-specific query, supplied as-is)

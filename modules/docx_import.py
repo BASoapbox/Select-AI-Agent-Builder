@@ -371,9 +371,10 @@ def _extract_custom_tools(data: dict[str, str]) -> list[dict]:
     accuracy, but its absence won't break anything).
 
     Returns a list of dicts. PL/SQL-body tools carry "raw_plsql"; OML4Py
-    tools carry "python_script"/"data_query"/"pyqscript_name"/
-    "credential_name"/"param_spec" — sql_builder dispatches on which keys
-    are present.
+    tools carry "python_script"/"data_query"/"pyqscript_name"/"param_spec"
+    — sql_builder dispatches on which keys are present. A "Credential Name"
+    field in older docs is still accepted but ignored: the generated
+    wrapper reads its password from OCI Vault ([de] secret_ocid).
     """
     field_pat = re.compile(
         r"^custom_tool_(\d+)_(name|functionname|instruction|plsqlbody|code|type|inputs"
@@ -426,7 +427,6 @@ def _extract_custom_tools(data: dict[str, str]) -> list[dict]:
                 "python_script": python_script,
                 "data_query": data_query,
                 "pyqscript_name": (g.get("pyqscriptname") or "").strip(),
-                "credential_name": (g.get("credentialname") or "").strip(),
                 "param_spec": (g.get("parameters") or g.get("paramspec") or "").strip(),
             })
         else:

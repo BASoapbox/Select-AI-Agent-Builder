@@ -6,7 +6,7 @@ STRICT RULES — follow exactly, no exceptions:
 
 NL2SQL PROFILE:
 - provider must be "oci" (NOT "ocigenai")
-- credential_name must be "OCI$RESOURCE_PRINCIPAL" (NOT "ACME_OML_CRED")
+- credential_name must be "OCI$RESOURCE_PRINCIPAL" (never a credential you create)
 - Do NOT include a "region" attribute — set to the database's own region it breaks every call with ORA-20404
 - Always include "oci_compartment_id" — required or ORA-20052
 - Always include "comments": "true" and "constraints": "true"
@@ -49,6 +49,14 @@ CREATE_TEAM:
 - agents array with name (agent name) and task (task name)
 - process: "sequential"
 
+CUSTOM PYTHON (OML4Py) TOOL:
+- Read the schema password from OCI Vault at run time, never from a DBMS_CLOUD credential
+- NEVER query user_cloud_credential_attrs or any credential view — a credential's password cannot be read back
+- NEVER put a password literal in the script
+- Vault read: DBMS_CLOUD.SEND_REQUEST with credential_name "OCI$RESOURCE_PRINCIPAL", method GET, uri https://secrets.vaults.<region>.oci.oraclecloud.com/20190301/secretbundles/<secret_ocid>, then base64-decode JSON_VALUE(DBMS_CLOUD.GET_RESPONSE_TEXT(resp), '$.secretBundleContent.content')
+- SEND_REQUEST returns DBMS_CLOUD_TYPES.resp — read the body with DBMS_CLOUD.GET_RESPONSE_TEXT, never .text
+- Log errors through a PRAGMA AUTONOMOUS_TRANSACTION procedure — the wrapper is called from SQL (ORA-14551)
+
 DROP BLOCK:
 - One outer BEGIN...END;/ block containing all inner BEGIN...EXCEPTION WHEN OTHERS THEN NULL; END; drops
 - Drop order: TEAM → AGENT$ orphan profile → TASK → AGENT → TOOLS → PROFILES → VECTOR INDEX
@@ -85,6 +93,26 @@ BEGIN
   );
 END;
 /
+
+CORRECT EXAMPLE — Vault read for a Python tool's OML token refresh:
+CREATE OR REPLACE FUNCTION acme_corp_get_secret(p_secret_ocid IN VARCHAR2)
+RETURN VARCHAR2 IS
+    v_resp DBMS_CLOUD_TYPES.resp;
+    v_b64  VARCHAR2(32767);
+BEGIN
+    v_resp := DBMS_CLOUD.SEND_REQUEST(
+        credential_name => 'OCI$RESOURCE_PRINCIPAL',
+        uri             => 'https://secrets.vaults.<REGION>.oci.oraclecloud.com'
+                        || '/20190301/secretbundles/' || p_secret_ocid,
+        method          => 'GET');
+    v_b64 := JSON_VALUE(DBMS_CLOUD.GET_RESPONSE_TEXT(v_resp),
+                        '$.secretBundleContent.content');
+    IF v_b64 IS NULL THEN RETURN NULL; END IF;
+    RETURN UTL_RAW.CAST_TO_VARCHAR2(
+               UTL_ENCODE.BASE64_DECODE(UTL_RAW.CAST_TO_RAW(v_b64)));
+END acme_corp_get_secret;
+/
+-- in the wrapper: v_pwd := acme_corp_get_secret('<SECRET_OCID>');
 
 OUTPUT FORMAT:
 Return ONLY the PL/SQL script. No markdown, no explanation, no preamble.

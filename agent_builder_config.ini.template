@@ -185,8 +185,12 @@ target_data_schema = ACME_CORP
 
 # OCID of an OCI Vault secret containing the TARGET SCHEMA's DB password.
 # This tool does not create Vaults, Keys, or Secrets — ask your DE team
-# for a Vault secret OCID for this schema and paste it here. Used by
-# "Create DB credential" (DBMS_CLOUD.CREATE_CREDENTIAL).
+# for a Vault secret OCID for this schema and paste it here. Generated
+# custom Python tools read it at run time, through the database's Resource
+# Principal, to refresh their OML token. It is never copied into a
+# DBMS_CLOUD credential: on 26ai a credential's password cannot be read back.
+# The IAM policy must let this ADW read this one secret's bundle — see
+# Admin Setup → Check Vault access.
 #
 # For a LOGIN password, use the [secrets] section at the end of this file
 # instead. This key applies only when the user connecting IS target_schema:
@@ -194,16 +198,9 @@ target_data_schema = ACME_CORP
 # resolved to the schema's password rather than their own.
 secret_ocid =
 
-# Name of the OCI Vault credential in ADW (DBMS_CLOUD.CREATE_CREDENTIAL)
-# Defaults to <SCHEMA>_OML_CRED if not set — override here if your DE used
-# a different name
-# Example: ACME_OML_CRED
-oml_credential_name = ACME_OML_CRED
-
-# Password used by custom Python (OML4Py) tools to refresh their OML
-# token — only needed if a project has a custom tool with hardcoded
-# token-refresh PL/SQL. Oracle does not support retrieving a DBMS_CLOUD
-# credential's password back out via SQL, so it has to be supplied directly.
+# Password for a pasted custom tool body that still contains a
+# <SET ... PASSWORD HERE> placeholder. Builder-generated Python tools do not
+# use this: they read [de] secret_ocid from Vault at run time.
 #
 # LEAVE THIS BLANK. The builder then prompts for it (masked) whenever a
 # project needs it, and that path never writes the password to disk. Filling
@@ -224,8 +221,8 @@ oml_base_url =
 # before OCI_DB_PASSWORD_<USER>, so a user listed here never needs the
 # password in an environment variable or typed at a prompt.
 #
-# Distinct from [de] secret_ocid, which is the target schema's password and
-# is used to build the OML credential.
+# Distinct from [de] secret_ocid, which is the target schema's password that
+# generated Python tools read at run time.
 #
 # A lookup that fails (secret deleted, IAM denies, oci SDK missing) is not
 # fatal — resolution falls through to the environment and the prompt, and

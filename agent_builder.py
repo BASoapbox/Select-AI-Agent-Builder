@@ -123,11 +123,11 @@ DE_EXTRA_FIELDS = {
         "target_schema",      # schema to create and grant to
         "dynamic_group_name", # name given to the Dynamic Group
         "policy_name",        # name given to the IAM Policy
-        "oml_credential_name",# DB credential name; defaults to <SCHEMA>_OML_CRED if blank
         "oml_base_url",       # for pyqAppendHostAce
         # secret_ocid: OCID of an OCI Vault secret containing the schema
-        # password. This tool does not create Vaults or Secrets — DE
-        # supplies this OCID directly, from a secret they've already
+        # password. Generated Python tools read it at run time to refresh
+        # their OML token. This tool does not create Vaults or Secrets —
+        # DE supplies this OCID directly, from a secret they've already
         # created and manage themselves.
         "secret_ocid",
     ]
@@ -162,7 +162,7 @@ DE_SUBMENUS_EXTRA = {
             ("de_adw_rp",     "Enable Resource Principal for target schema"),
             ("de_adw_grants", "Grant DBMS_CLOUD packages + PYQADMIN + OML_DEVELOPER"),
             ("de_adw_ace",    "pyqAppendHostAce — EPE network ACL for OML endpoint"),
-            ("de_adw_cred",   "Create Vault credential (DBMS_CLOUD.CREATE_CREDENTIAL)"),
+            ("de_adw_cred",   "Check Vault access for Python tools (read-only)"),
             ("back",          "← Back"),
         ],
     },
@@ -486,6 +486,22 @@ def do_iam_policy(cfg, clients, display, dry_run):
         f"allow any-user to manage generative-ai-family in compartment {comp_ref} where request.principal.type = 'genaiagent'",
     ]
 
+    # Generated Python tools read the schema password from Vault on every
+    # call. Scope the read to this database and this one secret: without
+    # both conditions any Autonomous Database could read every secret in
+    # the compartment. Assumes the secret lives in the same compartment.
+    adw_ocid    = _de_get(cfg, "adw_ocid")
+    secret_ocid = _de_get(cfg, "secret_ocid")
+    if adw_ocid and secret_ocid:
+        statements.append(
+            f"allow any-user to read secret-bundles in compartment {comp_ref} "
+            f"where all {{request.principal.type = 'autonomousdatabase', "
+            f"request.principal.id = '{adw_ocid}', target.secret.id = '{secret_ocid}'}}"
+        )
+    else:
+        display.warn("[de] adw_ocid or secret_ocid not set — policy will not let "
+                     "Python tools read their password from Vault")
+
     display.info(f"Policy      : {policy_name}")
     display.info(f"Compartment : {comp_ref}")
     display.info(f"Home region : {home_region}")
@@ -675,14 +691,21 @@ def do_adw_pyq_ace(cfg, clients, display, dry_run):
         conn.close()
 
 
-def do_adw_vault_credential(cfg, clients, display, dry_run):
-    display.head("ADW — CREATE VAULT CREDENTIAL")
+def do_adw_vault_check(cfg, clients, display, dry_run):
+    """
+    Prove the database can read [de] secret_ocid from OCI Vault with its
+    Resource Principal — the read every generated Python tool makes on
+    each call to refresh its OML token. Read-only: prints the HTTP status,
+    never the secret.
 
-    target_schema = _de_get(cfg, "target_schema",
-                             fallback=cfg_module.get(cfg, "database", "db_user"))
-    secret_ocid   = _de_get(cfg, "secret_ocid")
-    cred_name     = _de_get(cfg, "oml_credential_name",
-                             fallback=f"{(target_schema or '').strip().upper()}_OML_CRED")
+    This step used to create a DBMS_CLOUD credential holding the schema
+    password. On 26ai that password cannot be read back out, so nothing
+    uses such a credential any more and none is created.
+    """
+    display.head("ADW — CHECK VAULT ACCESS (RESOURCE PRINCIPAL)")
+
+    secret_ocid = _de_get(cfg, "secret_ocid")
+    region      = cfg_module.get(cfg, "oci", "region")
 
     if not secret_ocid:
         display.err("secret_ocid not set in [de] config section")
@@ -690,12 +713,12 @@ def do_adw_vault_credential(cfg, clients, display, dry_run):
                      "schema's password, then set [de] secret_ocid in config.ini")
         return
 
-    display.info(f"Target schema : {target_schema}")
-    display.info(f"Credential    : {cred_name}")
     display.info(f"Secret OCID   : {secret_ocid[:60]}...")
+    display.info(f"Region        : {region}")
 
     if dry_run:
-        display.warn(f"[DRY RUN] Would create credential '{cred_name}' in {target_schema}")
+        display.warn("[DRY RUN] Would read the secret bundle via OCI$RESOURCE_PRINCIPAL "
+                     "and report the HTTP status")
         return
 
     conn, err = _connect_admin(cfg)
@@ -704,36 +727,30 @@ def do_adw_vault_credential(cfg, clients, display, dry_run):
         return
 
     try:
-        # Drop first (idempotent)
-        drop_sql = f"""
-        BEGIN
-            DBMS_CLOUD.DROP_CREDENTIAL(
-                credential_name => '{cred_name}',
-                owner           => '{target_schema.upper()}'
-            );
-        EXCEPTION WHEN OTHERS THEN NULL;
-        END;
-        """
-        _exec_admin(conn, drop_sql, ignore_errors=True)
-
-        create_sql = f"""
-        BEGIN
-            DBMS_CLOUD.CREATE_CREDENTIAL(
-                credential_name => '{cred_name}',
-                params          => JSON_OBJECT(
-                    'username'  VALUE '{target_schema.upper()}',
-                    'secret_id' VALUE '{secret_ocid}'
-                ),
-                owner           => '{target_schema.upper()}'
-            );
-        END;
-        """
-        ok, err = _exec_admin(conn, create_sql, ignore_errors=True)
-        if ok:
-            display.ok(f"Credential '{cred_name}' created in schema {target_schema}")
-            display.info("Auto-refreshes from Vault every 12 hours")
+        cur    = conn.cursor()
+        status = cur.var(int)
+        cur.execute("""
+            DECLARE
+                v_resp DBMS_CLOUD_TYPES.resp;
+            BEGIN
+                v_resp := DBMS_CLOUD.SEND_REQUEST(
+                    credential_name => 'OCI$RESOURCE_PRINCIPAL',
+                    uri             => 'https://secrets.vaults.' || :region
+                                    || '.oci.oraclecloud.com/20190301/secretbundles/'
+                                    || :secret_ocid,
+                    method          => 'GET');
+                :status := DBMS_CLOUD.GET_RESPONSE_STATUS_CODE(v_resp);
+            END;
+        """, {"region": region, "secret_ocid": secret_ocid, "status": status})
+        code = status.getvalue()
+        if code == 200:
+            display.ok(f"Vault read OK (HTTP {code}) — Python tools can refresh their OML token")
         else:
-            display.err(f"Credential creation failed: {str(err)[:200]}")
+            display.err(f"Vault read returned HTTP {code}")
+    except Exception as ex:
+        display.err(f"Vault read failed: {str(ex)[:200]}")
+        display.info("ORA-20404 usually means a wrong OCID, or no IAM policy lets "
+                     "this database read the secret (see the IAM Policy step)")
     finally:
         conn.close()
 
@@ -940,7 +957,7 @@ def do_create_schema(cfg, clients, display, dry_run):
     print(f"  {C.YELLOW}Choose a password for schema {target_schema}.{C.RESET}")
     print(f"  {C.DIM}Min 12 chars, at least one uppercase, number, and special char.{C.RESET}")
     print(f"  {C.DIM}This tool does not store or display it — record it yourself; "
-          f"DE will need it to create a Vault secret for the OML credential step.{C.RESET}")
+          f"DE will need it to create the Vault secret Python tools read.{C.RESET}")
     display.blank()
     try:
         pwd1 = getpass.getpass(f"  New password for {target_schema}: ")
@@ -986,8 +1003,8 @@ def do_create_schema(cfg, clients, display, dry_run):
 
     display.ok(f"Schema '{target_schema}' created")
     display.warn("This tool never stored or displayed the password you entered — "
-                  "make sure you recorded it. DE will need it to create a Vault "
-                  "secret for the OML credential step.")
+                  "make sure you recorded it. DE will need it to create the "
+                  "Vault secret Python tools read.")
 
 
 def do_run_all(cfg, clients, display, dry_run, config_path=None):
@@ -999,7 +1016,7 @@ def do_run_all(cfg, clients, display, dry_run, config_path=None):
     display.info("  4.  Enable Resource Principal")
     display.info("  5.  EXECUTE grants + roles")
     display.info("  6.  pyqAppendHostAce")
-    display.info("  7.  Create DB credential (DBMS_CLOUD.CREATE_CREDENTIAL)")
+    display.info("  7.  Check Vault access for Python tools (read-only)")
     display.blank()
     display.warn("Step 1 will prompt for a schema password.")
     display.warn("Step 7 requires [de] secret_ocid to already be set in config — "
@@ -1022,7 +1039,7 @@ def do_run_all(cfg, clients, display, dry_run, config_path=None):
         ("Resource Principal",       do_adw_resource_principal),
         ("Grants and Roles",         do_adw_grants),
         ("pyqAppendHostAce",         do_adw_pyq_ace),
-        ("DB Credential",            do_adw_vault_credential),
+        ("Vault Access",             do_adw_vault_check),
     ]
 
     for label, fn in steps:
@@ -1109,7 +1126,7 @@ def check_config_de(cfg, config_path: str):
     # secret_ocid is optional at check time — DE may not have it yet
     auto_written = {"secret_ocid"}
     # Fields with defaults
-    has_defaults = {"oml_credential_name", "admin_user"}
+    has_defaults = {"admin_user"}
 
     de_fields = [f for f in DE_EXTRA_FIELDS["de"] if not f.startswith("#")]
     de_issues = []
@@ -1242,7 +1259,7 @@ def dispatch(choice: str, cfg, config_path: str,
         "de_adw_rp":       do_adw_resource_principal,
         "de_adw_grants":   do_adw_grants,
         "de_adw_ace":      do_adw_pyq_ace,
-        "de_adw_cred":     do_adw_vault_credential,
+        "de_adw_cred":     do_adw_vault_check,
         "de_ds_proxy":     do_ds_proxy_grant,
         "de_de_proxy":     do_de_proxy_grant,
     }

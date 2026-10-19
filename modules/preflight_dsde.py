@@ -185,8 +185,7 @@ DE_EXTRA_EXPECTED = [
     ("de",         "target_data_schema", "schema owning production tables",          False, False),
     ("de",         "dynamic_group_name", "e.g. acme-adw-dynamic-group",             False, False),
     ("de",         "policy_name",        "e.g. pol-acme-resource-principal",   False, False),
-    ("de",         "oml_credential_name","defaults to <SCHEMA>_OML_CRED if blank",   False, False),
-    ("de",         "secret_ocid",        "Vault secret OCID — DE-supplied, not auto-populated", False, False),
+    ("de",         "secret_ocid",        "Vault secret OCID — schema password Python tools read", False, False),
     ("de",         "oml_base_url",       "OML REST endpoint URL",                    False, False),
     # [preflight]
     ("preflight",  "dynamic_group_name", "IAM Dynamic Group name",                   False, False),
